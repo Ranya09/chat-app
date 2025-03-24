@@ -1,10 +1,10 @@
 import React from "react";
-import Chat from "./chat"; // Assurez-vous que le fichier Chat.js est correctement importé avec une majuscule "Chat"
+import ImprovedChat from "./ImprovedChat"; // Importation du nouveau composant
 
 function App() {
   return (
     <div className="App">
-      <Chat />
+      <ImprovedChat />
     </div>
   );
 }
