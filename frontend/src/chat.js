@@ -11,6 +11,8 @@ function Chat() {
     event.preventDefault();
     if (!message) return;
 
+    // Effacer la réponse précédente avant d'en demander une nouvelle
+    setResponse("");
     setLoading(true);
 
     try {
@@ -19,9 +21,11 @@ function Chat() {
         message: message,
         role: "user",
         conversation_id: conversationId,
+        language: "auto" // Utiliser la détection automatique de langue
       });
 
       setResponse(res.data.response); // Affiche la réponse de l'API
+      console.log("Réponse brute du backend:", res.data.response); // Log pour déboguer
     } catch (error) {
       console.error("Error during the API request", error);
       setResponse("There was an error with the request.");
@@ -30,9 +34,18 @@ function Chat() {
     }
   };
 
+  // Fonction pour démarrer une nouvelle conversation
+  const startNewConversation = () => {
+    setResponse("");
+    setMessage("");
+  };
+
   return (
     <div>
       <h1>Chat with AI</h1>
+      <button onClick={startNewConversation} style={{ marginBottom: '10px' }}>
+        New Conversation
+      </button>
       <form onSubmit={handleSubmit}>
         <textarea
           value={message}
@@ -51,7 +64,7 @@ function Chat() {
         {response && (
           <>
             <h2>AI Response:</h2>
-            <p>{response}</p>
+            <div dangerouslySetInnerHTML={{ __html: response }} />
           </>
         )}
       </div>

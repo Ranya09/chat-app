@@ -7,6 +7,8 @@ from groq import Groq
 from fastapi.middleware.cors import CORSMiddleware
 import time
 from pdf_indexer import PDFIndexer  # Importer notre classe PDFIndexer
+from language_detector import detect_language  # Importer notre détecteur de langue
+from legal_links_database import enrich_text_with_links  # Importer notre fonction d'enrichissement de liens
 
 # Load environment variables from .env file
 load_dotenv()
@@ -44,17 +46,41 @@ class UserInput(BaseModel):
     message: str
     role: str = "user"
     conversation_id: str
+    language: str = "auto"  # "french", "tunisian" ou "auto" pour détection automatique
 
 
 class Conversation:
-    def __init__(self):
-        self.messages: List[Dict[str, str]] = [
-            {"role": "system", "content": """Tu es un assistant juridique spécialisé dans le droit tunisien. 
+    def __init__(self, language: str = "tunisian"):
+        self.language = language
+        
+        # Prompt système en français
+        system_prompt_french = """Tu es un assistant juridique spécialisé dans le droit tunisien. 
             Tu dois fournir des informations précises et à jour sur les lois et réglementations tunisiennes.
             Utilise les informations juridiques fournies dans le contexte pour répondre aux questions.
             Si tu n'as pas d'information spécifique dans le contexte fourni, précise-le clairement.
             N'invente jamais de lois ou de dispositions légales qui ne sont pas mentionnées dans le contexte.
-            Cite les références légales pertinentes quand elles sont disponibles dans le contexte."""}
+            Cite les références légales pertinentes quand elles sont disponibles dans le contexte."""
+        
+        # Prompt système en dialecte tunisien
+        system_prompt_tunisian = """Enti moustachèr 9anouni mta3 el 9anoun ettounsi.
+            Lazem t3awed bel lahja tounsia w t3ati ma3loumet d9i9a w jdida 3la el 9awanin w el tachri3et ettounsia.
+            Esta3mel el ma3loumet el 9anounia elli mawjouda fel contexte bech tjèweb 3la el as2ila.
+            Ken ma 3andekch ma3loumet khasouçia fel contexte elli ja, 9oul bsaraha.
+            Ma tkhammemch 9awanin wala ahkèm 9anounia elli mech madhkoura fel contexte.
+            Semmi el marèji3 el 9anounia el mouhimma ki tekoun mawjouda fel contexte.
+            
+            FORMAT EL IJÈBA:
+            - Ebda b'ijèba moubachra lel so2èl
+            - Fassar b'tafaçil el 9anounia el mouhimma
+            - Semmi el fouçoul mta3 el 9anoun w el marèji3 bidha99a
+            - Ekhtom b'naçayeh 3amalia wala khatawèt lazem tetba3
+            - Ken el ma3loumet mech mawjouda, e9tereh maçader okhrin"""
+        
+        # Sélectionner le prompt système en fonction de la langue
+        selected_prompt = system_prompt_tunisian if language == "tunisian" else system_prompt_french
+        
+        self.messages: List[Dict[str, str]] = [
+            {"role": "system", "content": selected_prompt}
         ]
         self.active: bool = True
         self.last_activity: float = time.time()
@@ -83,13 +109,27 @@ def query_groq_api(conversation: Conversation, user_query: str) -> str:
             # Trouver le dernier message de l'utilisateur
             for i in range(len(messages_with_context) - 1, -1, -1):
                 if messages_with_context[i]["role"] == "user":
-                    # Ajouter le contexte juridique
-                    enhanced_message = f"""Question de l'utilisateur: {messages_with_context[i]['content']}
+                    # Déterminer le format du message enrichi en fonction de la langue
+                    if conversation.language == "tunisian":
+                        # Message enrichi en dialecte tunisien
+                        enhanced_message = f"""So2èl el mosta3mel: {messages_with_context[i]['content']}
+
+Contexte 9anouni tounsi lazem tekhouou b3in el e3tibar:
+{legal_context}
+
+Jèweb 3ala el so2èl bel lahja tounsia w b'estikhdam el contexte el 9anouni ettounsi.
+Ken el contexte ma fihch ma3loumet mouhimma lel so2èl, 9oul haka bsaraha w e9tereh maçader okhrin.
+Rakeb ijèbtek b'a9sam mra9ma ken lazem w ekhtom b'naçayeh 3amalia."""
+                    else:
+                        # Message enrichi en français
+                        enhanced_message = f"""Question de l'utilisateur: {messages_with_context[i]['content']}
 
 Contexte juridique tunisien à prendre en compte:
 {legal_context}
 
-Réponds à la question en te basant sur ce contexte juridique tunisien."""
+Réponds à la question en te basant sur ce contexte juridique tunisien. 
+Si le contexte ne contient pas d'information pertinente pour répondre à la question, indique-le clairement et suggère des ressources alternatives.
+Structure ta réponse avec des sections numérotées si nécessaire et termine par des recommandations pratiques."""
                     
                     # Remplacer le message original par le message enrichi
                     messages_with_context[i]["content"] = enhanced_message
@@ -120,21 +160,57 @@ Réponds à la question en te basant sur ce contexte juridique tunisien."""
 
 
 # Conversation management functions
-def get_or_create_conversation(conversation_id: str) -> Conversation:
+def get_or_create_conversation(conversation_id: str, language: str = "tunisian") -> Conversation:
     if conversation_id not in conversations:
-        conversations[conversation_id] = Conversation()
+        conversations[conversation_id] = Conversation(language=language)
     else:
         conversation = conversations[conversation_id]
         if time.time() - conversation.last_activity > 3600:  # 1 hour inactivity
             conversation.active = False
+            
+            # Prompt système en français pour la réinitialisation
+            system_prompt_french = """Tu es un assistant juridique spécialisé dans le droit tunisien. 
+               DIRECTIVES DE RÉPONSE :
+            1. Structure tes réponses de manière claire et professionnelle
+            2. Si tu n'as pas d'information spécifique dans le contexte fourni, précise-le clairement et suggère des alternatives
+            3. Cite toujours les références légales pertinentes quand elles sont disponibles
+            4. Organise ta réponse en sections avec des puces ou des numéros quand c'est approprié
+            5. Fournis des recommandations pratiques à la fin de ta réponse
+            
+            FORMAT DE RÉPONSE :
+            - Commence par une réponse directe à la question
+            - Développe avec les détails juridiques pertinents
+            - Cite les articles de loi et références exactes
+            - Termine par des recommandations pratiques ou des étapes à suivre
+            - Si l'information n'est pas disponible, suggère des ressources alternatives
+            ."""
+            
+            # Prompt système en dialecte tunisien pour la réinitialisation
+            system_prompt_tunisian = """Enti moustachèr 9anouni mta3 el 9anoun ettounsi.
+            TALIMET EL IJÈBA:
+            1. Rakeb ijèbtek b'tari9a wadh7a w ihtirèfia
+            2. Ken ma 3andekch ma3loumet khasouçia fel contexte elli ja, 9oul bsaraha w e9tereh 7ouloul okhra
+            3. Semmi dima el marèji3 el 9anounia el mouhimma ki yekounou mawjoudin
+            4. Nadhem ijèbtek fi a9sam b'no9at wala ar9am ki yekoun monèseb
+            5. A3ti naçayeh 3amalia fi ekher el ijèba
+            
+            CHKEL EL IJÈBA:
+            - Ebda b'ijèba moubachra lel so2èl
+            - Fassar b'tafaçil el 9anounia el mouhimma
+            - Semmi el fouçoul mta3 el 9anoun w el marèji3 bidha99a
+            - Ekhtom b'naçayeh 3amalia wala khatawèt lazem tetba3
+            - Ken el ma3loumet mech mawjouda, e9tereh maçader okhrin."""
+            
+            # Sélectionner le prompt système en fonction de la langue
+            selected_prompt = system_prompt_tunisian if language == "tunisian" else system_prompt_french
+            
             conversation.messages = [
-                {"role": "system", "content": """Tu es un assistant juridique spécialisé dans le droit tunisien. 
-                Tu dois fournir des informations précises et à jour sur les lois et réglementations tunisiennes.
-                Utilise les informations juridiques fournies dans le contexte pour répondre aux questions.
-                Si tu n'as pas d'information spécifique dans le contexte fourni, précise-le clairement.
-                N'invente jamais de lois ou de dispositions légales qui ne sont pas mentionnées dans le contexte.
-                Cite les références légales pertinentes quand elles sont disponibles dans le contexte."""}
+                {"role": "system", "content": selected_prompt}
             ]
+            
+            # Mettre à jour la langue de la conversation
+            conversation.language = language
+            
     return conversations[conversation_id]
 
 
@@ -145,8 +221,17 @@ async def chat(input: UserInput, request: Request):
 
     if not input.message or not input.conversation_id:
         raise HTTPException(status_code=400, detail="Message and conversation_id are required")
-
-    conversation = get_or_create_conversation(input.conversation_id)
+    
+    # Détecter automatiquement la langue du message
+    detected_language = detect_language(input.message)
+    print(f"Langue détectée: {detected_language}")
+    
+    # Utiliser la langue détectée si l'utilisateur n'a pas explicitement spécifié une langue
+    if input.language == "auto":
+        input.language = detected_language
+    
+    # Récupérer ou créer la conversation avec la langue spécifiée
+    conversation = get_or_create_conversation(input.conversation_id, input.language)
 
     if not conversation.active:
         raise HTTPException(
@@ -163,12 +248,15 @@ async def chat(input: UserInput, request: Request):
         # Query Groq API with enhanced context
         response = query_groq_api(conversation, input.message)
 
-        # Append assistant's response to the conversation
+        # Enrichir la réponse avec des liens vers des ressources juridiques
+        enriched_response = enrich_text_with_links(response)
+        
+        # Append assistant's response to the conversation (version non enrichie pour l'historique)
         conversation.messages.append({"role": "assistant", "content": response})
 
         return {
             "message": "Response generated successfully!",
-            "response": response,
+            "response": enriched_response,
             "conversation_id": input.conversation_id,
         }
 

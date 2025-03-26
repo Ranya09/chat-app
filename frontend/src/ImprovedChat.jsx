@@ -1,134 +1,90 @@
 import React, { useState, useEffect, useRef } from "react";
 import axios from "axios";
 import "./ChatStyles.css";
+import { FaMoon, FaSun, FaSearch, FaFileAlt, FaLanguage } from "react-icons/fa";
+import translations from "./translations";
 
 function ImprovedChat() {
   const [message, setMessage] = useState("");
-  const [conversationId] = useState("123"); // ID statique pour simplifier
-  const [messages, setMessages] = useState([]);
+  const [conversationId] = useState("123");
+  // Toujours démarrer avec une nouvelle conversation contenant uniquement le message de bienvenue
+  const [messages, setMessages] = useState([
+    { 
+      role: "assistant", 
+      content: "Ahla bik! 👋 أهلا بيك في المستشار القانوني التونسي. كيفاش نجم نعاونك اليوم؟\n\nBienvenue dans l'Assistant Juridique Tunisien. Comment puis-je vous aider aujourd'hui?" 
+    }
+  ]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [darkMode, setDarkMode] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [language, setLanguage] = useState("auto"); // "french", "tunisian" ou "auto"
   const messagesEndRef = useRef(null);
+  
+  // Fonction de traduction
+  const t = (text) => translations[text] || text;
 
-  // Fonction pour faire défiler automatiquement vers le bas
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
+  const suggestions = [
+    t("Quels sont mes droits en tant que salarié ?"),
+    t("Comment créer une entreprise en Tunisie ?"),
+    t("Procédure de divorce en Tunisie"),
+    t("Lois sur la propriété immobilière"),
+    t("Droits des consommateurs en Tunisie")
+  ];
 
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
 
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
+  }, [darkMode]);
+
+  // Suppression de l'effet qui sauvegarde les messages dans le localStorage
+  // pour ne pas conserver l'historique entre les sessions
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
   const handleSubmit = async (event) => {
     event.preventDefault();
     if (!message.trim()) return;
 
-    // Ajouter le message de l'utilisateur à l'historique
-    setMessages((prevMessages) => [
-      ...prevMessages,
-      { role: "user", content: message },
-    ]);
-    
-    const userMessage = message;
-    setMessage(""); // Vider le champ de saisie
+    const userMessage = { role: "user", content: message };
+    setMessages((prev) => [...prev, userMessage]);
+    setMessage("");
     setLoading(true);
     setError(null);
 
     try {
-      // Préparation des données à envoyer
-      const requestData = {
-        message: userMessage,
+      // Ajouter un log pour déboguer
+      console.log("Envoi de la requête au backend avec la langue:", language);
+      
+      const res = await axios.post("http://127.0.0.1:8000/chat/", {
+        message: userMessage.content,
         role: "user",
         conversation_id: conversationId,
-      };
+        language: language // Utiliser la langue sélectionnée par l'utilisateur
+      }, {
+        headers: { 'Content-Type': 'application/json' }
+      });
       
-      console.log("Envoi de la requête avec les données:", requestData);
+      // Ajouter un log pour voir la réponse brute du backend
+      console.log("Réponse brute du backend:", res.data.response);
       
-      // Envoie de la requête à l'API FastAPI
-      const res = await axios.post("http://127.0.0.1:8000/chat/", requestData, {
-        headers: {
-          'Content-Type': 'application/json',
-        }
-      }) ;
-
-      console.log("Réponse reçue:", res.data);
-
-      // Ajouter la réponse de l'assistant à l'historique
-      setMessages((prevMessages) => [
-        ...prevMessages,
-        { role: "assistant", content: res.data.response },
-      ]);
+      const botMessage = { role: "assistant", content: res.data.response };
+      setMessages((prev) => [...prev, botMessage]);
     } catch (error) {
-      console.error("Erreur lors de la requête API:", error);
-      
-      // Afficher des informations détaillées sur l'erreur
-      if (error.response) {
-        // La requête a été faite et le serveur a répondu avec un code d'état
-        console.error("Données d'erreur:", error.response.data);
-        console.error("Statut d'erreur:", error.response.status);
-        console.error("En-têtes d'erreur:", error.response.headers);
-        
-        setError(`Erreur ${error.response.status}: ${error.response.data.detail || "Une erreur s'est produite"}`);
-      } else if (error.request) {
-        // La requête a été faite mais aucune réponse n'a été reçue
-        console.error("Requête sans réponse:", error.request);
-        setError("Aucune réponse du serveur. Vérifiez que le serveur est en cours d'exécution.");
-      } else {
-        // Une erreur s'est produite lors de la configuration de la requête
-        console.error("Erreur de configuration:", error.message);
-        setError(`Erreur: ${error.message}`);
-      }
-      
-      // Ajouter un message d'erreur à l'historique
-      setMessages((prevMessages) => [
-        ...prevMessages,
-        { 
-          role: "system", 
-          content: "Une erreur s'est produite lors de la communication avec le serveur. Veuillez réessayer." 
-        },
-      ]);
+      setError(t("Une erreur s'est produite lors de la communication avec le serveur."));
+      console.error("Erreur API:", error);
     } finally {
       setLoading(false);
     }
   };
 
-  // Fonction pour extraire les sources juridiques des réponses
-  const extractSources = (text) => {
-    // Recherche des mentions de documents dans le texte
-    const sourceRegex = /Document \d+\s*\(([^,]+),\s*score: [\d.]+\)/g;
-    const matches = [...text.matchAll(sourceRegex)];
-    
-    if (matches.length === 0) return null;
-    
-    return (
-      <div className="sources">
-        <p className="sources-title">Sources juridiques :</p>
-        <ul>
-          {matches.map((match, index) => (
-            <li key={index}>{match[1]}</li>
-          ))}
-        </ul>
-      </div>
-    );
-  };
-
-  // Fonction pour formater le texte avec mise en évidence des articles de loi
-  const formatLegalText = (text) => {
-    // Mise en évidence des références aux articles de loi
-    const formattedText = text.replace(
-      /(article|Article|loi|Loi|décret|Décret)\s+(\d+[-\d]*)/g,
-      '<span class="legal-reference">$1 $2</span>'
-    );
-    
-    return <div dangerouslySetInnerHTML={{ __html: formattedText }} />;
-  };
-
-  // Fonction pour exporter la conversation
   const exportConversation = () => {
-    const conversationText = messages
-      .map((msg) => `${msg.role === "user" ? "Vous" : msg.role === "assistant" ? "Assistant" : "Système"}: ${msg.content}`)
-      .join("\n\n");
-    
+    const conversationText = messages.map(msg => `${msg.role === "user" ? t("Vous") : t("Assistant")}: ${msg.content}`).join("\n\n");
     const blob = new Blob([conversationText], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -140,88 +96,138 @@ function ImprovedChat() {
     URL.revokeObjectURL(url);
   };
 
+  const formatLegalText = (text) => {
+    // Créer un élément DOM temporaire pour manipuler le HTML
+    const tempDiv = document.createElement('div');
+    tempDiv.innerHTML = text;
+    
+    // Extraire tous les liens existants et les remplacer par des marqueurs uniques
+    const links = [];
+    const linkElements = tempDiv.querySelectorAll('a');
+    linkElements.forEach((link, index) => {
+      const marker = `__LINK_MARKER_${index}__`;
+      links.push({
+        marker: marker,
+        outerHTML: link.outerHTML
+      });
+      link.outerHTML = marker;
+    });
+    
+    // Obtenir le texte sans les liens
+    let formattedText = tempDiv.innerHTML;
+    
+    // Mise en évidence des références aux articles de loi (version tunisienne)
+    formattedText = formattedText.replace(
+      /(فصل|قانون|أمر|مرسوم)\s+(\d+[-\d]*)/g,
+      '<span class="legal-reference">$1 $2</span>'
+    );
+    
+    // Mise en évidence des références aux articles de loi (version française)
+    formattedText = formattedText.replace(
+      /(article|Article|loi|Loi|décret|Décret)\s+(\d+[-\d]*)/g,
+      '<span class="legal-reference">$1 $2</span>'
+    );
+    
+    // Mise en forme des titres et sections
+    formattedText = formattedText
+      // Formatage des titres numérotés (1., 2., etc.)
+      .replace(/^(\d+\.\s+)(.+)$/gm, '<h3>$1$2</h3>')
+      // Formatage des puces
+      .replace(/^(\*\s+)(.+)$/gm, '<div class="bullet-point">$1$2</div>')
+      // Formatage des recommandations (version tunisienne)
+      .replace(/^(نوصيك.+)$/gm, '<div class="recommendation">$1</div>')
+      // Formatage des recommandations (version française)
+      .replace(/^(Je vous recommande.+)$/gm, '<div class="recommendation">$1</div>');
+    
+    // Réinsérer les liens originaux
+    links.forEach(link => {
+      formattedText = formattedText.replace(link.marker, link.outerHTML);
+    });
+    
+    return <div dangerouslySetInnerHTML={{ __html: formattedText }} />;
+  };
+
+  // Fonction pour changer la langue
+  const changeLanguage = (newLanguage) => {
+    setLanguage(newLanguage);
+  };
+
+  // Fonction pour démarrer une nouvelle conversation
+  const startNewConversation = () => {
+    setMessages([
+      { 
+        role: "assistant", 
+        content: "Ahla bik! 👋 أهلا بيك في المستشار القانوني التونسي. كيفاش نجم نعاونك اليوم؟\n\nBienvenue dans l'Assistant Juridique Tunisien. Comment puis-je vous aider aujourd'hui?" 
+      }
+    ]);
+    setSearchQuery("");
+    setError(null);
+  };
+
   return (
     <div className="chat-container">
+      <div className="top-controls">
+        <button className="theme-toggle" onClick={() => setDarkMode(!darkMode)}>
+          {darkMode ? <FaSun /> : <FaMoon />}
+        </button>
+        <div className="language-selector">
+          <FaLanguage className="language-icon" />
+          <select 
+            value={language} 
+            onChange={(e) => changeLanguage(e.target.value)}
+            className="language-select"
+          >
+            <option value="auto">{t("Détection automatique")}</option>
+            <option value="tunisian">{t("Dialecte tunisien")}</option>
+            <option value="french">{t("Français")}</option>
+          </select>
+        </div>
+      </div>
       <div className="chat-header">
-        <h1>Assistant Juridique Tunisien</h1>
-        <p className="subtitle">Posez vos questions sur le droit tunisien</p>
+        <h1>{t("Assistant Juridique Tunisien")}</h1>
+        <button className="new-conversation-button" onClick={startNewConversation}>
+          {t("Nouvelle conversation")}
+        </button>
       </div>
 
+      {messages.length > 0 && (
+        <div className="search-container">
+          <input type="text" className="search-input" placeholder={t("Rechercher...")} value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+          <FaSearch className="search-icon" />
+        </div>
+      )}
+
       <div className="messages-container">
-        {messages.length === 0 ? (
-          <div className="welcome-message">
-            <h2>Bienvenue dans votre assistant juridique tunisien</h2>
-            <p>
-              Je peux vous aider à comprendre les lois et réglementations tunisiennes.
-              Posez-moi une question sur le droit tunisien.
-            </p>
-          </div>
-        ) : (
-          messages.map((msg, index) => (
-            <div
-              key={index}
-              className={`message ${
-                msg.role === "user" 
-                  ? "user-message" 
-                  : msg.role === "assistant" 
-                    ? "assistant-message" 
-                    : "system-message"
-              }`}
-            >
-              <div className="message-header">
-                {msg.role === "user" 
-                  ? "Vous" 
-                  : msg.role === "assistant" 
-                    ? "Assistant Juridique" 
-                    : "Système"}
-              </div>
-              <div className="message-content">
-                {msg.role === "assistant" 
-                  ? formatLegalText(msg.content) 
-                  : msg.content}
-                {msg.role === "assistant" && extractSources(msg.content)}
-              </div>
-            </div>
-          ))
-        )}
-        {loading && (
-          <div className="message assistant-message">
-            <div className="message-header">Assistant Juridique</div>
-            <div className="message-content loading">
-              <div className="typing-indicator">
-                <span></span>
-                <span></span>
-                <span></span>
-              </div>
+        {messages.filter(msg => msg.content.toLowerCase().includes(searchQuery.toLowerCase())).map((msg, index) => (
+          <div key={index} className={`message ${msg.role}-message`}>
+            <div className="message-header">{msg.role === "user" ? t("Vous") : t("Assistant")}</div>
+            <div className="message-content">
+              {msg.role === "assistant" ? formatLegalText(msg.content) : msg.content}
             </div>
           </div>
-        )}
+        ))}
+        {loading && <div className="loading">{t("Envoi en cours...")}</div>}
         {error && <div className="error-message">{error}</div>}
         <div ref={messagesEndRef} />
       </div>
 
+      <div className="suggestions-container">
+        {suggestions.map((suggestion, index) => (
+          <div key={index} className="suggestion-chip" onClick={() => setMessage(suggestion)}>
+            {suggestion}
+          </div>
+        ))}
+      </div>
+
       <form onSubmit={handleSubmit} className="message-form">
-        <textarea
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          placeholder="Posez votre question juridique ici..."
-          rows="3"
-          disabled={loading}
-        />
+        <textarea value={message} onChange={(e) => setMessage(e.target.value)} placeholder={t("Posez votre question...")} rows="3" disabled={loading} />
         <div className="button-container">
           {messages.length > 0 && (
-            <button 
-              type="button" 
-              onClick={exportConversation} 
-              className="export-button"
-              disabled={loading}
-            >
-              Exporter la conversation
+            <button type="button" onClick={exportConversation} className="export-button">
+              <FaFileAlt style={{ marginRight: '5px' }} /> {t("Exporter")}
             </button>
           )}
-          <button type="submit" disabled={loading || !message.trim()}>
-            {loading ? "Envoi..." : "Envoyer"}
-          </button>
+          <button type="submit" disabled={loading || !message.trim()}>{t("Envoyer")}</button>
         </div>
       </form>
     </div>
