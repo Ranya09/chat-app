@@ -1,12 +1,12 @@
 import os
+import re
+import time
 from typing import List, Dict
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from pydantic import BaseModel
 from groq import Groq
 from fastapi.middleware.cors import CORSMiddleware
-import time
-import re  # Pour la détection de langue
 from pdf_indexer import PDFIndexer  # Importer notre classe PDFIndexer améliorée
 
 # Load environment variables from .env file
@@ -512,9 +512,30 @@ async def get_document_templates():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ------ Nouvel Endpoint d'Upload de Document ------
 
-# Run the application
+@app.post("/upload_document/")
+async def upload_document(
+    file: UploadFile = File(...),
+    conversation_id: str = Form(...),
+    language: str = Form(...)
+):
+    try:
+        upload_dir = "uploaded_documents"
+        if not os.path.exists(upload_dir):
+            os.makedirs(upload_dir)
+        file_location = os.path.join(upload_dir, file.filename)
+        with open(file_location, "wb") as f:
+            content = await file.read()
+            f.write(content)
+        # Ici, vous pouvez intégrer une logique d'analyse du document (ex : PDFIndexer)
+        summary = f"Résumé du fichier {file.filename}"  # Exemple de résumé
+        return {"summary": summary, "filename": file.filename}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Lancer l'application (si exécuté directement)
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
