@@ -84,51 +84,103 @@ function ImprovedChat() {
   const toggleLanguage = () => {
     setCurrentLanguage(prev => prev === "fr" ? "ar" : "fr");
   };
+const handleSubmit = async (event) => {
+  event.preventDefault();
+  
+  // Validation du message
+  const trimmedMessage = message.trim();
+  if (!trimmedMessage) return;
 
-  const handleSubmit = async (event) => {
-    event.preventDefault();
-    if (!message.trim()) return;
-
-    const detectedLanguage = detectLanguage(message);
+  try {
+    // Détection de la langue
+    const detectedLanguage = detectLanguage(trimmedMessage);
     setCurrentLanguage(detectedLanguage);
     
-    setMessages(prev => [...prev, { 
+    // Mise à jour optimiste de l'UI
+    const userMessage = { 
       role: "user", 
-      content: message,
-      language: detectedLanguage 
-    }]);
-    
+      content: trimmedMessage,
+      language: detectedLanguage,
+      timestamp: new Date().toISOString() 
+    };
+    setMessages(prev => [...prev, userMessage]);
     setMessage("");
     setLoading(true);
     setError(null);
 
-    try {
-      const res = await axios.post("http://127.0.0.1:8000/chat/", {
-        message,
-        role: "user",
-        conversation_id: conversationId,
-      }, {
-        headers: { 'Content-Type': 'application/json' }
-      });
+    // Envoi de la requête avec timeout et annulation
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
 
-      const responseLanguage = res.data.language === "arabic" ? "ar" : "fr";
-      setCurrentLanguage(responseLanguage);
+ // Modifier la configuration Axios
+const res = await axios.post("http://127.0.0.1:8000/chat/", {
+  message: trimmedMessage,
+  role: "user",
+  conversation_id: conversationId,
+}, {
+  headers: { 
+    'Content-Type': 'application/json',
+    'Accept-Language': detectedLanguage 
+  },
+  timeout: 60000, // Timeout à 60 secondes
+  signal: controller.signal
+});
 
-      setMessages(prev => [...prev, { 
-        role: "assistant", 
-        content: res.data.response,
-        language: responseLanguage
-      }]);
-    } catch (error) {
-      setError(currentLanguage === "ar" 
-        ? "حدث خطأ أثناء الاتصال بالخادم." 
-        : "Une erreur s'est produite lors de la communication avec le serveur.");
-      console.error("Error details:", error);
-    } finally {
-      setLoading(false);
+    clearTimeout(timeoutId);
+
+    // Traitement de la réponse
+    if (!res.data?.response) {
+      throw new Error('Réponse vide du serveur');
     }
-  };
 
+    const responseLanguage = res.data.language === "arabic" ? "ar" : "fr";
+    setCurrentLanguage(responseLanguage);
+
+    const assistantMessage = { 
+      role: "assistant", 
+      content: res.data.response,
+      language: responseLanguage,
+      timestamp: new Date().toISOString()
+    };
+    setMessages(prev => [...prev, assistantMessage]);
+
+  } catch (error) {
+    // Gestion fine des erreurs
+    let errorMessage = currentLanguage === "ar" 
+      ? "حدث خطأ أثناء الاتصال بالخادم." 
+      : "Une erreur s'est produite lors de la communication avec le serveur.";
+
+    if (axios.isCancel(error)) {
+      errorMessage = currentLanguage === "ar"
+        ? "تم إلغاء الطلب بسبب تجاوز المهلة."
+        : "La requête a expiré (timeout).";
+    } else if (error.response) {
+      // Erreurs HTTP (500, 404, etc.)
+      errorMessage = currentLanguage === "ar"
+        ? `خطأ في الخادم: ${error.response.status}`
+        : `Erreur serveur: ${error.response.status}`;
+      
+      if (error.response.data?.detail) {
+        errorMessage += ` - ${error.response.data.detail}`;
+      }
+    }
+
+    setError(errorMessage);
+    console.error("Détails de l'erreur:", {
+      error: error.message,
+      status: error.response?.status,
+      data: error.response?.data,
+      stack: error.stack
+    });
+
+    // Option: Réessayer automatiquement
+    // await new Promise(resolve => setTimeout(resolve, 2000));
+    // return handleSubmit(event);
+
+  } finally {
+    setLoading(false);
+  }
+};
   const exportConversation = () => {
     const conversationText = messages.map((msg) => {
       const sender = msg.role === "user" 

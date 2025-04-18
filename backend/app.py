@@ -1,23 +1,37 @@
 import os
 import re
 import time
+import logging
 from typing import List, Dict
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from pydantic import BaseModel
 from groq import Groq
 from fastapi.middleware.cors import CORSMiddleware
+from werkzeug.utils import secure_filename
 from pdf_indexer import PDFIndexer  # Importer notre classe PDFIndexer améliorée
+
+# Configuration des logs
+logging.basicConfig(filename='app.log', level=logging.INFO)
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Get Groq API key from environment variables
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Check if the API key is available
+
+# Obtenir la clé API
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# Obtenir le modèle (avec une valeur par défaut sécurisée)
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-70b-8192")
+
+# Vérifier si la clé API est définie
 if not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY not found in .env file")
+
+# Vérifier si le modèle est vide (optionnel mais propre)
+if not GROQ_MODEL:
+    raise ValueError("GROQ_MODEL not found in .env file")
+
 
 # Initialize FastAPI application
 app = FastAPI()
@@ -221,9 +235,9 @@ Réponds en français."""
         
         print("Envoi de la requête à Groq...")
         completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=GROQ_MODEL,
             messages=messages_with_context,
-            temperature=0.7,
+            temperature=0.3,
             max_tokens=1024,
             top_p=1,
             stream=False,
@@ -283,44 +297,55 @@ Utilise les informations juridiques fournies dans le contexte pour répondre aux
 # API endpoint for chat
 @app.post("/chat/")
 async def chat(input: UserInput, request: Request):
-    print(f"Received input: {input}")  # For debugging
-
+    # Ajout de logs détaillés
+    logging.info(f"Requête reçue - Conversation ID: {input.conversation_id}")
+    
     if not input.message or not input.conversation_id:
-        raise HTTPException(status_code=400, detail="Message and conversation_id are required")
-
-    conversation = get_or_create_conversation(input.conversation_id)
-
-    if not conversation.active:
-        raise HTTPException(
-            status_code=400,
-            detail="The chat session has ended. Please start a new session.",
-        )
+        logging.error("Message ou conversation_id manquant")
+        raise HTTPException(status_code=400, detail="Message et conversation_id sont obligatoires")
 
     try:
-        # Append user message to the conversation
-        conversation.messages.append({"role": input.role, "content": input.message})
+        conversation = get_or_create_conversation(input.conversation_id)
+        
+        if not conversation.active:
+            logging.warning(f"Conversation inactive - ID: {input.conversation_id}")
+            raise HTTPException(status_code=400, detail="La session de chat est terminée. Veuillez démarrer une nouvelle session.")
 
+        # Ajout du message utilisateur
+        conversation.messages.append({
+            "role": input.role,
+            "content": input.message
+        })
         conversation.update_last_activity()
 
-        # Query Groq API with enhanced context and language detection
-        response = query_groq_api(conversation, input.message)
+        # Appel sécurisé à l'API Groq
+        try:
+            response = query_groq_api(conversation, input.message)
+        except Exception as e:
+            logging.error(f"Erreur API Groq: {str(e)}")
+            raise HTTPException(status_code=503, detail="Service temporairement indisponible")
 
-        # Append assistant's response to the conversation
-        conversation.messages.append({"role": "assistant", "content": response})
-
-        # Détecter la langue de la réponse pour informer le frontend
-        response_language = detect_language(response)
+        # Ajout de la réponse
+        conversation.messages.append({
+            "role": "assistant",
+            "content": response
+        })
 
         return {
-            "message": "Response generated successfully!",
+            "message": "Réponse générée avec succès",
             "response": response,
             "conversation_id": input.conversation_id,
-            "language": response_language  # Ajouter la langue détectée à la réponse
+            "language": detect_language(response)
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Erreur détaillée dans chat endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Erreur inattendue: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Une erreur interne est survenue. Veuillez réessayer."
+        )
 
 
 # Endpoint pour réindexer les documents (utile si vous ajoutez de nouveaux documents)
@@ -338,12 +363,12 @@ async def reindex_documents():
 async def test_groq():
     try:
         completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="llama-3.3-70b-specdec",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": "Hello, how are you?"}
             ],
-            temperature=0.7,
+            temperature=0.3,
             max_tokens=100
         )
         return {"status": "success", "response": completion.choices[0].message.content}
@@ -512,27 +537,89 @@ async def get_document_templates():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ------ Nouvel Endpoint d'Upload de Document ------
-
+# ------ Endpoint d'Upload de Document Sécurisé ------
 @app.post("/upload_document/")
 async def upload_document(
     file: UploadFile = File(...),
     conversation_id: str = Form(...),
-    language: str = Form(...)
+    language: str = Form("fr")
 ):
     try:
-        upload_dir = "uploaded_documents"
-        if not os.path.exists(upload_dir):
-            os.makedirs(upload_dir)
-        file_location = os.path.join(upload_dir, file.filename)
-        with open(file_location, "wb") as f:
-            content = await file.read()
-            f.write(content)
-        # Ici, vous pouvez intégrer une logique d'analyse du document (ex : PDFIndexer)
-        summary = f"Résumé du fichier {file.filename}"  # Exemple de résumé
-        return {"summary": summary, "filename": file.filename}
+        # 1. Validation du fichier
+        if not file.filename:
+            raise HTTPException(400, "Aucun nom de fichier fourni")
+
+        filename = secure_filename(file.filename)
+        if not filename:
+            raise HTTPException(400, "Nom de fichier invalide")
+
+        # 2. Vérification de l'extension
+        allowed_extensions = {'.pdf', '.doc', '.docx', '.txt'}
+        file_ext = os.path.splitext(filename)[1].lower()
+        if file_ext not in allowed_extensions:
+            raise HTTPException(400, 
+                f"Type de fichier non supporté. Formats acceptés: {', '.join(allowed_extensions)}")
+
+        # 3. Configuration du dossier
+        upload_dir = os.path.abspath("uploaded_documents")
+        try:
+            os.makedirs(upload_dir, exist_ok=True)
+            # Vérification des permissions
+            if not os.access(upload_dir, os.W_OK):
+                raise HTTPException(500, "Permissions insuffisantes sur le dossier de destination")
+        except Exception as e:
+            logging.error(f"Erreur création dossier: {str(e)}")
+            raise HTTPException(500, "Impossible de créer le dossier de destination")
+
+        # 4. Préparation du chemin final
+        file_location = os.path.join(upload_dir, filename)
+        
+        # 5. Téléchargement sécurisé
+        try:
+            with open(file_location, "wb") as f:
+                # Limite à 50MB et lecture par chunks
+                max_size = 50 * 1024 * 1024  # 50MB
+                total_size = 0
+                chunk_size = 1024 * 1024  # 1MB
+                
+                while content := await file.read(chunk_size):
+                    total_size += len(content)
+                    if total_size > max_size:
+                        os.remove(file_location)  # Nettoyer le fichier partiel
+                        raise HTTPException(413, f"Fichier trop volumineux. Maximum {max_size//(1024*1024)}MB")
+                    f.write(content)
+        except Exception as e:
+            if os.path.exists(file_location):
+                os.remove(file_location)
+            logging.error(f"Erreur écriture fichier: {str(e)}")
+            raise HTTPException(500, "Erreur lors de l'enregistrement du fichier")
+
+        # 6. Traitement selon le type de fichier
+        summary = f"Fichier {filename} enregistré avec succès"
+        if file_ext == '.pdf':
+            try:
+                # Ajouter à l'indexeur PDF si disponible
+                if hasattr(pdf_indexer, 'add_document'):
+                    pdf_indexer.add_document(file_location)
+                    summary = "Document PDF indexé avec succès"
+            except Exception as e:
+                logging.warning(f"Erreur indexation PDF: {str(e)}")
+                summary = f"Document enregistré mais erreur d'indexation: {str(e)}"
+
+        return {
+            "status": "success",
+            "filename": filename,
+            "size": f"{os.path.getsize(file_location)/(1024*1024):.2f}MB",
+            "summary": summary,
+            "conversation_id": conversation_id,
+            "language": language
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Erreur inattendue: {str(e)}", exc_info=True)
+        raise HTTPException(500, f"Erreur interne du serveur: {str(e)}")
 
 
 # Lancer l'application (si exécuté directement)
