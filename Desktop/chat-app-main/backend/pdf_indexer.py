@@ -116,16 +116,13 @@ class PDFIndexer:
     def get_relevant_context(self, query: str, max_chars: int = 4000) -> str:
         results = self.search(query, top_k=3)
         if not results:
-            return "Aucun résultat trouvé."
+            return ""
 
         context = "Informations juridiques pertinentes :\n\n"
         total_chars = len(context)
-        
         for i, result in enumerate(results):
             doc_info = f"Document {i+1} ({os.path.basename(result['path'])}, score: {result['score']:.2f}):\n"
             doc_content = result['content']
-            
-            # Vérifier si on dépasse la limite de caractères
             if total_chars + len(doc_info) + len(doc_content) + 2 > max_chars:
                 available_chars = max_chars - total_chars - len(doc_info) - 2
                 if available_chars > 100:
@@ -134,8 +131,6 @@ class PDFIndexer:
                     break
             context += doc_info + doc_content + "\n\n"
             total_chars = len(context)
-            
             if total_chars >= max_chars:
                 break
-
         return context

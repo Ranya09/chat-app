@@ -4,13 +4,12 @@ import time
 import logging
 from typing import List, Dict
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form,Response
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from pydantic import BaseModel
 from groq import Groq
 from fastapi.middleware.cors import CORSMiddleware
 from werkzeug.utils import secure_filename
 from pdf_indexer import PDFIndexer  # Importer notre classe PDFIndexer améliorée
-from uuid import uuid4
 
 # Configuration des logs
 logging.basicConfig(filename='app.log', level=logging.INFO)
@@ -36,27 +35,6 @@ if not GROQ_MODEL:
 
 # Initialize FastAPI application
 app = FastAPI()
-# Route pour envoyer un message
-
-
-
-# 🔽🔽🔽 AJOUT ICI : Endpoint pour démarrer une nouvelle session 🔽🔽🔽
-
-
-@app.post("/chat/start")
-def start_chat():
-    conversation_id = str(uuid4())
-    conversations[conversation_id] = Conversation()
-    logging.info(f"Nouvelle session créée - ID: {conversation_id}")
-    return {"conversation_id": conversation_id}
-# 🔼🔼🔼 FIN AJOUT 🔼🔼🔼
-
-@app.post("/end-session")
-async def end_session(response: Response):
-    response.delete_cookie("session")  # Supprimer le cookie de session
-    return {"message": "La session de chat est terminée. Veuillez démarrer une nouvelle session."}
-
-
 
 # Configure CORS
 app.add_middleware(
@@ -105,6 +83,7 @@ class ResponseCache:
 # Initialiser le cache
 response_cache = ResponseCache(max_size=100)
 
+# Data models
 class UserInput(BaseModel):
     message: str
     role: str = "user"
@@ -117,15 +96,13 @@ class FeedbackInput(BaseModel):
     comment: str = ""
 
 class DocumentRequest(BaseModel):
-    document_type: str
-    language: str = "fr"
-    parameters: dict
-
-
+    document_type: str  # "lettre_mise_en_demeure", "requete_simple", "procuration", etc.
+    language: str = "fr"  # "fr" ou "ar"
+    parameters: dict  # Paramètres spécifiques au type de document
 
 class Conversation:
-    def __init__(self, existing_messages: List[Dict[str, str]] = None):
-        self.messages: List[Dict[str, str]] = existing_messages or [
+    def __init__(self):
+        self.messages: List[Dict[str, str]] = [
             {"role": "system", "content": """Tu es un assistant juridique spécialisé dans le droit tunisien, capable de répondre en français et en arabe.
 
 DIRECTIVES GÉNÉRALES :
@@ -149,11 +126,8 @@ FORMAT DE RÉPONSE EN FRANÇAIS :
 
 Utilise les informations juridiques fournies dans le contexte pour répondre aux questions."""}
         ]
+        self.active: bool = True
         self.last_activity: float = time.time()
-        self.timeout: int = 86400  # 24 heures
-
-    def is_expired(self) -> bool:
-        return (time.time() - self.last_activity) > self.timeout
 
     def update_last_activity(self):
         self.last_activity = time.time()
@@ -173,6 +147,7 @@ def detect_language(text: str) -> str:
         return "arabic"
     else:
         return "french"  # Par défaut, on considère que c'est du français
+
 
 # Groq API interaction function with context enhancement and language detection
 def query_groq_api(conversation: Conversation, user_query: str) -> str:
@@ -284,60 +259,159 @@ Réponds en français."""
         raise HTTPException(status_code=500, detail=f"Error with Groq API: {str(e)}")
 
 
+# Conversation management functions
 def get_or_create_conversation(conversation_id: str) -> Conversation:
-    if conversation_id in conversations:
+    if conversation_id not in conversations:
+        conversations[conversation_id] = Conversation()
+    else:
         conversation = conversations[conversation_id]
-        
-        # Réactiver la session si expirée en mettant à jour last_activity
-        if conversation.is_expired():
-            logging.info(f"Session expirée réactivée - ID: {conversation_id}")
-            conversation.update_last_activity()
-        
-        return conversation
-    
-    # Créer une nouvelle conversation seulement si l'ID est inconnu
-    new_conversation = Conversation()
-    conversations[conversation_id] = new_conversation
-    logging.info(f"Nouvelle session créée - ID: {conversation_id}")
-    return new_conversation
+        if time.time() - conversation.last_activity > 3600:  # 1 hour inactivity
+            conversation.active = False
+            conversation.messages = [
+                {"role": "system", "content": """Tu es un assistant juridique spécialisé dans le droit tunisien, capable de répondre en français et en arabe.
+
+DIRECTIVES GÉNÉRALES :
+1. Détecte automatiquement la langue de l'utilisateur (français ou arabe) et réponds dans la même langue
+2. Justifie toujours tes réponses avec des références précises aux lois, codes et articles tunisiens
+3. Structure tes réponses de manière claire et professionnelle
+4. Si tu n'as pas d'information spécifique dans le contexte fourni, précise-le clairement
+5. N'invente jamais de lois ou de dispositions légales qui ne sont pas mentionnées dans le contexte
+
+FORMAT DE RÉPONSE EN FRANÇAIS :
+- Commence par une réponse directe à la question
+- Développe avec les détails juridiques pertinents
+- Cite explicitement les articles de loi et références exactes (ex: "Selon l'article 123 du Code du Travail tunisien...")
+- Termine par des recommandations pratiques ou des étapes à suivre
+
+تنسيق الإجابة بالعربية:
+- ابدأ بإجابة مباشرة على السؤال
+- قم بتطوير إجابتك مع التفاصيل القانونية ذات الصلة
+- استشهد صراحة بمواد القانون والمراجع الدقيقة (مثال: "وفقًا للمادة 123 من مجلة الشغل التونسية...")
+- اختم بتوصيات عملية أو خطوات يجب اتباعها
+
+Utilise les informations juridiques fournies dans le contexte pour répondre aux questions."""}
+            ]
+    return conversations[conversation_id]
+
+
+# API endpoint for chat
 @app.post("/chat/")
 async def chat(input: UserInput, request: Request):
+    # Ajout de logs détaillés
     logging.info(f"Requête reçue - Conversation ID: {input.conversation_id}")
     
     if not input.message or not input.conversation_id:
-        raise HTTPException(400, "Message et conversation_id sont obligatoires")
+        logging.error("Message ou conversation_id manquant")
+        raise HTTPException(status_code=400, detail="Message et conversation_id sont obligatoires")
 
     try:
         conversation = get_or_create_conversation(input.conversation_id)
         
-        # Mettre à jour l'activité à chaque interaction
-        conversation.update_last_activity()
+        if not conversation.active:
+            logging.warning(f"Conversation inactive - ID: {input.conversation_id}")
+            raise HTTPException(status_code=400, detail="La session de chat est terminée. Veuillez démarrer une nouvelle session.")
 
-        # Ajouter le message utilisateur
+        # Ajout du message utilisateur
         conversation.messages.append({
             "role": input.role,
             "content": input.message
         })
+        conversation.update_last_activity()
 
-        # Obtenir la réponse
-        response = query_groq_api(conversation, input.message)
-        
-        # Ajouter la réponse
+        # Appel sécurisé à l'API Groq
+        try:
+            response = query_groq_api(conversation, input.message)
+        except Exception as e:
+            logging.error(f"Erreur API Groq: {str(e)}")
+            raise HTTPException(status_code=503, detail="Service temporairement indisponible")
+
+        # Ajout de la réponse
         conversation.messages.append({
             "role": "assistant",
             "content": response
         })
 
         return {
+            "message": "Réponse générée avec succès",
             "response": response,
             "conversation_id": input.conversation_id,
-            "language": detect_language(response),
-            "session_status": "active" if not conversation.is_expired() else "expired"
+            "language": detect_language(response)
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logging.error(f"Erreur: {str(e)}", exc_info=True)
-        raise HTTPException(500, "Erreur interne du serveur")
+        logging.error(f"Erreur inattendue: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Une erreur interne est survenue. Veuillez réessayer."
+        )
+
+
+# Endpoint pour réindexer les documents (utile si vous ajoutez de nouveaux documents)
+@app.post("/reindex/")
+async def reindex_documents():
+    try:
+        pdf_indexer.index_documents()
+        return {"message": "Documents réindexés avec succès!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Endpoint de test pour vérifier la connexion à Groq
+@app.get("/test-groq/")
+async def test_groq():
+    try:
+        completion = client.chat.completions.create(
+            model="llama-3.3-70b-specdec",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Hello, how are you?"}
+            ],
+            temperature=0.3,
+            max_tokens=100
+        )
+        return {"status": "success", "response": completion.choices[0].message.content}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# Endpoint pour vider le cache
+@app.post("/clear_cache/")
+async def clear_cache():
+    response_cache.clear()
+    return {"message": "Cache vidé avec succès"}
+
+
+# Endpoint pour recevoir le feedback
+@app.post("/feedback/")
+async def submit_feedback(feedback: FeedbackInput):
+    try:
+        # Créer un répertoire pour stocker les feedbacks s'il n'existe pas
+        feedback_dir = "feedback_data"
+        if not os.path.exists(feedback_dir):
+            os.makedirs(feedback_dir)
+        
+        # Enregistrer le feedback dans un fichier CSV
+        feedback_file = os.path.join(feedback_dir, "feedback_log.csv")
+        
+        # Créer l'en-tête si le fichier n'existe pas
+        if not os.path.exists(feedback_file):
+            with open(feedback_file, "w", encoding="utf-8") as f:
+                f.write("timestamp,conversation_id,message_id,rating,comment\n")
+        
+        # Ajouter le feedback au fichier
+        with open(feedback_file, "a", encoding="utf-8") as f:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            # Échapper les virgules et les sauts de ligne dans le commentaire
+            safe_comment = feedback.comment.replace(",", "\\,").replace("\n", "\\n")
+            f.write(f"{timestamp},{feedback.conversation_id},{feedback.message_id},{feedback.rating},{safe_comment}\n")
+        
+        return {"message": "Feedback enregistré avec succès"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # Endpoint pour obtenir les statistiques de feedback
 @app.get("/feedback/stats/")
 async def get_feedback_stats():
@@ -550,5 +624,5 @@ async def upload_document(
 
 # Lancer l'application (si exécuté directement)
 if __name__ == "__main__":
-   
-   uvicorn.run(app, host="0.0.0.0", port=8000)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
