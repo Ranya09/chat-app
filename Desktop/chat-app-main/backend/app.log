@@ -25,3 +25,11 @@ INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "H
 INFO:root:Requête reçue - Conversation ID: 123
 INFO:root:Nouvelle session créée - ID: 123
 INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:root:Requête reçue - Conversation ID: 123
+INFO:root:Nouvelle session créée - ID: 123
+INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:root:Requête reçue - Conversation ID: 123
+INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:root:Requête reçue - Conversation ID: 123
+INFO:root:Nouvelle session créée - ID: 123
+INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
