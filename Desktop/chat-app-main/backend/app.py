@@ -1,0 +1,554 @@
+import os
+import re
+import time
+import logging
+from typing import List, Dict
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form,Response
+from pydantic import BaseModel
+from groq import Groq
+from fastapi.middleware.cors import CORSMiddleware
+from werkzeug.utils import secure_filename
+from pdf_indexer import PDFIndexer  # Importer notre classe PDFIndexer améliorée
+from uuid import uuid4
+
+# Configuration des logs
+logging.basicConfig(filename='app.log', level=logging.INFO)
+
+# Load environment variables from .env file
+load_dotenv()
+
+
+
+# Obtenir la clé API
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# Obtenir le modèle (avec une valeur par défaut sécurisée)
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-70b-8192")
+
+# Vérifier si la clé API est définie
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY not found in .env file")
+
+# Vérifier si le modèle est vide (optionnel mais propre)
+if not GROQ_MODEL:
+    raise ValueError("GROQ_MODEL not found in .env file")
+
+
+# Initialize FastAPI application
+app = FastAPI()
+# Route pour envoyer un message
+
+
+
+# 🔽🔽🔽 AJOUT ICI : Endpoint pour démarrer une nouvelle session 🔽🔽🔽
+
+
+@app.post("/chat/start")
+def start_chat():
+    conversation_id = str(uuid4())
+    conversations[conversation_id] = Conversation()
+    logging.info(f"Nouvelle session créée - ID: {conversation_id}")
+    return {"conversation_id": conversation_id}
+# 🔼🔼🔼 FIN AJOUT 🔼🔼🔼
+
+@app.post("/end-session")
+async def end_session(response: Response):
+    response.delete_cookie("session")  # Supprimer le cookie de session
+    return {"message": "La session de chat est terminée. Veuillez démarrer une nouvelle session."}
+
+
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins (for development). Change in production.
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize Groq client
+client = Groq(api_key=GROQ_API_KEY)
+
+# Initialize PDF indexer
+pdf_indexer = PDFIndexer(pdf_directory="legal_documents")
+# Indexer les documents au démarrage de l'application
+pdf_indexer.index_documents()
+
+# Système de cache simple
+class ResponseCache:
+    def __init__(self, max_size=100):
+        self.cache = {}
+        self.max_size = max_size
+        self.access_times = {}
+    
+    def get(self, key):
+        if key in self.cache:
+            self.access_times[key] = time.time()
+            return self.cache[key]
+        return None
+    
+    def set(self, key, value):
+        # Si le cache est plein, supprimer l'élément le moins récemment utilisé
+        if len(self.cache) >= self.max_size:
+            oldest_key = min(self.access_times.items(), key=lambda x: x[1])[0]
+            del self.cache[oldest_key]
+            del self.access_times[oldest_key]
+        
+        self.cache[key] = value
+        self.access_times[key] = time.time()
+    
+    def clear(self):
+        self.cache.clear()
+        self.access_times.clear()
+
+# Initialiser le cache
+response_cache = ResponseCache(max_size=100)
+
+class UserInput(BaseModel):
+    message: str
+    role: str = "user"
+    conversation_id: str
+
+class FeedbackInput(BaseModel):
+    conversation_id: str
+    message_id: str
+    rating: int  # 1-5
+    comment: str = ""
+
+class DocumentRequest(BaseModel):
+    document_type: str
+    language: str = "fr"
+    parameters: dict
+
+
+
+class Conversation:
+    def __init__(self, existing_messages: List[Dict[str, str]] = None):
+        self.messages: List[Dict[str, str]] = existing_messages or [
+            {"role": "system", "content": """Tu es un assistant juridique spécialisé dans le droit tunisien, capable de répondre en français et en arabe.
+
+DIRECTIVES GÉNÉRALES :
+1. Détecte automatiquement la langue de l'utilisateur (français ou arabe) et réponds dans la même langue
+2. Justifie toujours tes réponses avec des références précises aux lois, codes et articles tunisiens
+3. Structure tes réponses de manière claire et professionnelle
+4. Si tu n'as pas d'information spécifique dans le contexte fourni, précise-le clairement
+5. N'invente jamais de lois ou de dispositions légales qui ne sont pas mentionnées dans le contexte
+
+FORMAT DE RÉPONSE EN FRANÇAIS :
+- Commence par une réponse directe à la question
+- Développe avec les détails juridiques pertinents
+- Cite explicitement les articles de loi et références exactes (ex: "Selon l'article 123 du Code du Travail tunisien...")
+- Termine par des recommandations pratiques ou des étapes à suivre
+
+تنسيق الإجابة بالعربية:
+- ابدأ بإجابة مباشرة على السؤال
+- قم بتطوير إجابتك مع التفاصيل القانونية ذات الصلة
+- استشهد صراحة بمواد القانون والمراجع الدقيقة (مثال: "وفقًا للمادة 123 من مجلة الشغل التونسية...")
+- اختم بتوصيات عملية أو خطوات يجب اتباعها
+
+Utilise les informations juridiques fournies dans le contexte pour répondre aux questions."""}
+        ]
+        self.last_activity: float = time.time()
+        self.timeout: int = 86400  # 24 heures
+
+    def is_expired(self) -> bool:
+        return (time.time() - self.last_activity) > self.timeout
+
+    def update_last_activity(self):
+        self.last_activity = time.time()
+
+
+# In-memory conversation storage (for demonstration purposes)
+conversations: Dict[str, Conversation] = {}
+
+
+# Fonction simple de détection de langue
+def detect_language(text: str) -> str:
+    # Caractères arabes courants
+    arabic_pattern = re.compile(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]+')
+    
+    # Si le texte contient des caractères arabes, on considère qu'il est en arabe
+    if arabic_pattern.search(text):
+        return "arabic"
+    else:
+        return "french"  # Par défaut, on considère que c'est du français
+
+# Groq API interaction function with context enhancement and language detection
+def query_groq_api(conversation: Conversation, user_query: str) -> str:
+    try:
+        # Générer une clé de cache basée sur la requête et les derniers messages
+        # Limiter à 3 derniers messages pour éviter des clés trop longues
+        last_messages = conversation.messages[-3:] if len(conversation.messages) > 3 else conversation.messages
+        cache_key = f"{user_query}_{str(last_messages)}"
+        
+        # Vérifier si la réponse est dans le cache
+        cached_response = response_cache.get(cache_key)
+        if cached_response:
+            print("Réponse trouvée dans le cache")
+            return cached_response
+            
+        # Détecter la langue de la requête
+        language = detect_language(user_query)
+        print(f"Langue détectée: {language}")
+        
+        # Rechercher des informations pertinentes dans les documents juridiques
+        print(f"Recherche de contexte pour: {user_query}")
+        legal_context = pdf_indexer.get_relevant_context(user_query)
+        print(f"Contexte trouvé: {legal_context[:100]}..." if legal_context else "Aucun contexte trouvé")
+        
+        # Créer une copie des messages pour ne pas modifier l'historique original
+        messages_with_context = conversation.messages.copy()
+        
+        # Ajouter le contexte juridique au message de l'utilisateur si des informations pertinentes ont été trouvées
+        if legal_context:
+            # Trouver le dernier message de l'utilisateur
+            for i in range(len(messages_with_context) - 1, -1, -1):
+                if messages_with_context[i]["role"] == "user":
+                    # Ajouter le contexte juridique en fonction de la langue détectée
+                    if language == "arabic":
+                        enhanced_message = f"""سؤال المستخدم: {messages_with_context[i]['content']}
+
+السياق القانوني التونسي الذي يجب مراعاته:
+{legal_context}
+
+أجب على السؤال بناءً على هذا السياق القانوني التونسي.
+يجب أن تستشهد دائمًا بمواد القانون والمراجع الدقيقة (مثال: "وفقًا للمادة 123 من مجلة الشغل التونسية...").
+إذا كان السياق لا يحتوي على معلومات ذات صلة للإجابة على السؤال، فأشر إلى ذلك بوضوح واقترح موارد بديلة.
+قم بهيكلة إجابتك بأقسام مرقمة إذا لزم الأمر وانتهِ بتوصيات عملية.
+أجب باللغة العربية."""
+                    else:  # french
+                        enhanced_message = f"""Question de l'utilisateur: {messages_with_context[i]['content']}
+
+Contexte juridique tunisien à prendre en compte:
+{legal_context}
+
+Réponds à la question en te basant sur ce contexte juridique tunisien.
+Tu dois toujours citer explicitement les articles de loi et références exactes (ex: "Selon l'article 123 du Code du Travail tunisien...").
+Si le contexte ne contient pas d'information pertinente pour répondre à la question, indique-le clairement et suggère des ressources alternatives.
+Structure ta réponse avec des sections numérotées si nécessaire et termine par des recommandations pratiques.
+Réponds en français."""
+                    
+                    # Remplacer le message original par le message enrichi
+                    messages_with_context[i]["content"] = enhanced_message
+                    print(f"Message enrichi avec contexte juridique en {language}")
+                    break
+        else:
+            # Si aucun contexte n'est trouvé, ajouter une instruction pour répondre dans la langue détectée
+            for i in range(len(messages_with_context) - 1, -1, -1):
+                if messages_with_context[i]["role"] == "user":
+                    # Ajouter l'instruction de répondre dans la langue détectée
+                    if language == "arabic":
+                        enhanced_message = f"""سؤال المستخدم: {messages_with_context[i]['content']}
+
+لم يتم العثور على معلومات محددة في قاعدة البيانات القانونية.
+يرجى الإجابة على السؤال بأفضل ما لديك من معرفة عامة حول القانون التونسي.
+يجب أن تستشهد دائمًا بمواد القانون والمراجع الدقيقة إذا كنت تعرفها.
+أجب باللغة العربية."""
+                    else:  # french
+                        enhanced_message = f"""Question de l'utilisateur: {messages_with_context[i]['content']}
+
+Aucune information spécifique n'a été trouvée dans la base de données juridique.
+Réponds à la question avec ta meilleure connaissance générale du droit tunisien.
+Tu dois toujours citer explicitement les articles de loi et références exactes si tu les connais.
+Réponds en français."""
+                    
+                    # Remplacer le message original par le message enrichi
+                    messages_with_context[i]["content"] = enhanced_message
+                    print(f"Message enrichi avec instruction de répondre en {language}")
+                    break
+        
+        print("Envoi de la requête à Groq...")
+        completion = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages_with_context,
+            temperature=0.3,
+            max_tokens=1024,
+            top_p=1,
+            stream=False,
+            stop=None,
+        )
+        print("Réponse reçue de Groq")
+
+        # Access the content safely
+        response = completion.choices[0].message.content
+        print(f"Réponse générée: {response[:100]}...")
+        
+        # Stocker la réponse dans le cache
+        response_cache.set(cache_key, response)
+
+        return response
+
+    except Exception as e:
+        print(f"Erreur détaillée dans query_groq_api: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error with Groq API: {str(e)}")
+
+
+def get_or_create_conversation(conversation_id: str) -> Conversation:
+    if conversation_id in conversations:
+        conversation = conversations[conversation_id]
+        
+        # Réactiver la session si expirée en mettant à jour last_activity
+        if conversation.is_expired():
+            logging.info(f"Session expirée réactivée - ID: {conversation_id}")
+            conversation.update_last_activity()
+        
+        return conversation
+    
+    # Créer une nouvelle conversation seulement si l'ID est inconnu
+    new_conversation = Conversation()
+    conversations[conversation_id] = new_conversation
+    logging.info(f"Nouvelle session créée - ID: {conversation_id}")
+    return new_conversation
+@app.post("/chat/")
+async def chat(input: UserInput, request: Request):
+    logging.info(f"Requête reçue - Conversation ID: {input.conversation_id}")
+    
+    if not input.message or not input.conversation_id:
+        raise HTTPException(400, "Message et conversation_id sont obligatoires")
+
+    try:
+        conversation = get_or_create_conversation(input.conversation_id)
+        
+        # Mettre à jour l'activité à chaque interaction
+        conversation.update_last_activity()
+
+        # Ajouter le message utilisateur
+        conversation.messages.append({
+            "role": input.role,
+            "content": input.message
+        })
+
+        # Obtenir la réponse
+        response = query_groq_api(conversation, input.message)
+        
+        # Ajouter la réponse
+        conversation.messages.append({
+            "role": "assistant",
+            "content": response
+        })
+
+        return {
+            "response": response,
+            "conversation_id": input.conversation_id,
+            "language": detect_language(response),
+            "session_status": "active" if not conversation.is_expired() else "expired"
+        }
+
+    except Exception as e:
+        logging.error(f"Erreur: {str(e)}", exc_info=True)
+        raise HTTPException(500, "Erreur interne du serveur")
+# Endpoint pour obtenir les statistiques de feedback
+@app.get("/feedback/stats/")
+async def get_feedback_stats():
+    try:
+        feedback_file = os.path.join("feedback_data", "feedback_log.csv")
+        
+        if not os.path.exists(feedback_file):
+            return {"message": "Aucun feedback disponible", "stats": {}}
+        
+        # Lire le fichier CSV et calculer les statistiques
+        ratings = []
+        with open(feedback_file, "r", encoding="utf-8") as f:
+            # Ignorer l'en-tête
+            next(f)
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) >= 4:
+                    try:
+                        rating = int(parts[3])
+                        ratings.append(rating)
+                    except ValueError:
+                        continue
+        
+        if not ratings:
+            return {"message": "Aucun feedback disponible", "stats": {}}
+        
+        # Calculer les statistiques
+        avg_rating = sum(ratings) / len(ratings)
+        rating_counts = {i: ratings.count(i) for i in range(1, 6)}
+        
+        return {
+            "message": "Statistiques de feedback récupérées avec succès",
+            "stats": {
+                "total_feedbacks": len(ratings),
+                "average_rating": avg_rating,
+                "rating_distribution": rating_counts
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Endpoint pour générer des documents juridiques
+@app.post("/generate_document/")
+async def generate_document(request: DocumentRequest):
+    try:
+        # Vérifier si le type de document est supporté
+        supported_types = ["lettre_mise_en_demeure", "requete_simple", "procuration"]
+        if request.document_type not in supported_types:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Type de document non supporté. Types supportés: {', '.join(supported_types)}"
+            )
+        
+        # Vérifier la langue
+        if request.language not in ["fr", "ar"]:
+            raise HTTPException(status_code=400, detail="Langue non supportée. Langues supportées: fr, ar")
+        
+        # Charger le template approprié
+        template_dir = "document_templates"
+        template_file = os.path.join(template_dir, f"{request.document_type}_{request.language}.txt")
+        
+        if not os.path.exists(template_file):
+            raise HTTPException(status_code=404, detail="Template de document non trouvé")
+        
+        # Lire le template
+        with open(template_file, "r", encoding="utf-8") as f:
+            template = f.read()
+        
+        # Remplacer les variables dans le template
+        for key, value in request.parameters.items():
+            placeholder = f"{{{{{key}}}}}"
+            template = template.replace(placeholder, str(value))
+        
+        # Générer un nom de fichier unique
+        timestamp = time.strftime("%Y%m%d%H%M%S")
+        filename = f"{request.document_type}_{request.language}_{timestamp}.txt"
+        output_dir = "generated_documents"
+        
+        # Créer le répertoire s'il n'existe pas
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        # Enregistrer le document généré
+        output_path = os.path.join(output_dir, filename)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(template)
+        
+        # Retourner le document généré
+        return {
+            "message": "Document généré avec succès",
+            "document_content": template,
+            "filename": filename
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Endpoint pour obtenir la liste des templates disponibles
+@app.get("/document_templates/")
+async def get_document_templates():
+    try:
+        template_dir = "document_templates"
+        if not os.path.exists(template_dir):
+            return {"templates": []}
+        
+        templates = []
+        for file in os.listdir(template_dir):
+            if file.endswith(".txt"):
+                parts = file.split("_")
+                if len(parts) >= 2:
+                    doc_type = parts[0]
+                    language = parts[1].split(".")[0]
+                    templates.append({
+                        "type": doc_type,
+                        "language": language,
+                        "filename": file
+                    })
+        
+        return {"templates": templates}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ------ Endpoint d'Upload de Document Sécurisé ------
+@app.post("/upload_document/")
+async def upload_document(
+    file: UploadFile = File(...),
+    conversation_id: str = Form(...),
+    language: str = Form("fr")
+):
+    try:
+        # 1. Validation du fichier
+        if not file.filename:
+            raise HTTPException(400, "Aucun nom de fichier fourni")
+
+        filename = secure_filename(file.filename)
+        if not filename:
+            raise HTTPException(400, "Nom de fichier invalide")
+
+        # 2. Vérification de l'extension
+        allowed_extensions = {'.pdf', '.doc', '.docx', '.txt'}
+        file_ext = os.path.splitext(filename)[1].lower()
+        if file_ext not in allowed_extensions:
+            raise HTTPException(400, 
+                f"Type de fichier non supporté. Formats acceptés: {', '.join(allowed_extensions)}")
+
+        # 3. Configuration du dossier
+        upload_dir = os.path.abspath("uploaded_documents")
+        try:
+            os.makedirs(upload_dir, exist_ok=True)
+            # Vérification des permissions
+            if not os.access(upload_dir, os.W_OK):
+                raise HTTPException(500, "Permissions insuffisantes sur le dossier de destination")
+        except Exception as e:
+            logging.error(f"Erreur création dossier: {str(e)}")
+            raise HTTPException(500, "Impossible de créer le dossier de destination")
+
+        # 4. Préparation du chemin final
+        file_location = os.path.join(upload_dir, filename)
+        
+        # 5. Téléchargement sécurisé
+        try:
+            with open(file_location, "wb") as f:
+                # Limite à 50MB et lecture par chunks
+                max_size = 50 * 1024 * 1024  # 50MB
+                total_size = 0
+                chunk_size = 1024 * 1024  # 1MB
+                
+                while content := await file.read(chunk_size):
+                    total_size += len(content)
+                    if total_size > max_size:
+                        os.remove(file_location)  # Nettoyer le fichier partiel
+                        raise HTTPException(413, f"Fichier trop volumineux. Maximum {max_size//(1024*1024)}MB")
+                    f.write(content)
+        except Exception as e:
+            if os.path.exists(file_location):
+                os.remove(file_location)
+            logging.error(f"Erreur écriture fichier: {str(e)}")
+            raise HTTPException(500, "Erreur lors de l'enregistrement du fichier")
+
+        # 6. Traitement selon le type de fichier
+        summary = f"Fichier {filename} enregistré avec succès"
+        if file_ext == '.pdf':
+            try:
+                # Ajouter à l'indexeur PDF si disponible
+                if hasattr(pdf_indexer, 'add_document'):
+                    pdf_indexer.add_document(file_location)
+                    summary = "Document PDF indexé avec succès"
+            except Exception as e:
+                logging.warning(f"Erreur indexation PDF: {str(e)}")
+                summary = f"Document enregistré mais erreur d'indexation: {str(e)}"
+
+        return {
+            "status": "success",
+            "filename": filename,
+            "size": f"{os.path.getsize(file_location)/(1024*1024):.2f}MB",
+            "summary": summary,
+            "conversation_id": conversation_id,
+            "language": language
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Erreur inattendue: {str(e)}", exc_info=True)
+        raise HTTPException(500, f"Erreur interne du serveur: {str(e)}")
+
+
+# Lancer l'application (si exécuté directement)
+if __name__ == "__main__":
+   
+   uvicorn.run(app, host="0.0.0.0", port=8000)
